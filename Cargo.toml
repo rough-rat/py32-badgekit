@@ -1,0 +1,30 @@
+[package]
+name = "py32-badgekit"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Common firmware parts for coin cell LED badges built on PY32 MCUs"
+repository = "https://github.com/rough-rat/py32-badgekit"
+
+# The modules behind features each claim an interrupt handler, so they are
+# only compiled in when a board asks for them.
+[features]
+# SysTick
+charlieplex = []
+# TIM14
+soft-pwm = []
+# ADC_COMP
+battery = []
+
+[dependencies]
+cortex-m = "0.7.7"
+cortex-m-rt = "0.7.3"
+embassy-time = "0.3.2"
+
+# No chip feature here on purpose: the board crate picks the chip (and the
+# time driver) on its own py32-hal dependency, which has to be this version.
+# Pinned exactly: 0.2.1 already changes the clock config API.
+py32-hal = { version = "=0.2.0", default-features = false, features = [
+    "exti",
+    "time",
+] }
