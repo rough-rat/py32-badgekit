@@ -8,6 +8,7 @@
 use core::ptr;
 
 use cortex_m::peripheral::NVIC;
+use py32_hal::pac::rcc::vals::Sw as Sysclk;
 use py32_hal::{interrupt, pac};
 
 use crate::Port;
@@ -90,7 +91,12 @@ impl WakePin {
 ///
 /// Returns with the button still held down; wait for its release before
 /// polling it again. SWD is dead while in Stop mode.
+///
+/// The chip wakes up on HSI. If the system clock was the PLL, it is turned
+/// back on and selected again before returning.
 pub fn stop(wake: WakePin) {
+    let on_pll = pac::RCC.cfgr().read().sws() == Sysclk::PLL;
+
     loop {
         wake.clear_irq();
         wake.arm();
@@ -118,7 +124,16 @@ pub fn stop(wake: WakePin) {
 
         // Any other interrupt that was still pending ends the WFI as well.
         if wake.is_low() {
-            return;
+            break;
         }
+    }
+
+    if on_pll {
+        // PLL source and flash latency are kept through Stop mode.
+        let rcc = pac::RCC;
+        rcc.cr().modify(|w| w.set_pllon(true));
+        while !rcc.cr().read().pllrdy() {}
+        rcc.cfgr().modify(|w| w.set_sw(Sysclk::PLL));
+        while rcc.cfgr().read().sws() != Sysclk::PLL {}
     }
 }

@@ -9,8 +9,11 @@ repository = "https://github.com/rough-rat/py32-badgekit"
 # The modules behind features each claim an interrupt handler, so they are
 # only compiled in when a board asks for them.
 [features]
-# SysTick
+# SysTick and PendSV
 charlieplex = []
+# Runs the charlieplex scan from RAM (~1KB). Worth it above 24MHz, where
+# flash needs a wait state.
+scan-in-ram = []
 # TIM14
 soft-pwm = []
 # ADC_COMP
@@ -19,6 +22,7 @@ battery = []
 [dependencies]
 cortex-m = "0.7.7"
 cortex-m-rt = "0.7.3"
+embassy-sync = "0.6.1"
 embassy-time = "0.3.2"
 
 # No chip feature here on purpose: the board crate picks the chip (and the

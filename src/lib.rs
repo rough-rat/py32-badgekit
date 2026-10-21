@@ -28,6 +28,7 @@ pub enum Port {
 impl Port {
     const COUNT: usize = 3;
 
+    #[inline(always)]
     fn regs(self) -> pac::gpio::Gpio {
         match self {
             Port::A => pac::GPIOA,

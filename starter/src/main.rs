@@ -13,7 +13,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant};
 
 use py32_badgekit::button::Button;
-use py32_badgekit::charlieplex::{self, Led};
+use py32_badgekit::charlieplex::{self, Buffers, Led};
 use py32_badgekit::power::{self, WakePin};
 use py32_badgekit::Port;
 use py32_hal::gpio::{Input, Pull};
@@ -25,8 +25,8 @@ use {defmt_rtt as _, panic_halt as _};
 
 const SYSCLK_HZ: u32 = 8_000_000;
 
-/// 12 slots * 500us = 6ms -> ~167Hz refresh.
-const SLOT_US: u32 = 500;
+/// 12 slots of ~500us each.
+const REFRESH_HZ: u32 = 167;
 
 /// Charlieplex pins on port A.
 const LED_PINS: [u8; 4] = [0, 1, 2, 3];
@@ -43,6 +43,7 @@ static LEDS: [Led; LED_COUNT] = {
     leds
 };
 static LED_GROUPS: [&[Led]; 1] = [&LEDS];
+static LED_BUFFERS: Buffers<LED_COUNT, LED_COUNT> = Buffers::new();
 
 /// Button to ground on PB0.
 const WAKE: WakePin = WakePin::new(Port::B, 0);
@@ -62,6 +63,7 @@ async fn animate(button: &mut Button<'_>) {
     while Instant::now() < deadline {
         charlieplex::clear();
         charlieplex::set(i, true);
+        charlieplex::present().await;
         i = (i + 1) % LED_COUNT;
 
         if button.pressed_within(CHASE_STEP).await {
@@ -87,7 +89,7 @@ async fn main(_spawner: Spawner) {
 
     // PA13/PA14 (SWD) and PF2 (nRST) are left alone on purpose.
     let syst = cortex_m::Peripherals::take().unwrap().SYST;
-    charlieplex::init(syst, SYSCLK_HZ, SLOT_US, &LED_GROUPS);
+    charlieplex::init(syst, SYSCLK_HZ, REFRESH_HZ, &LED_GROUPS, &LED_BUFFERS);
 
     let mut button = Button::new(Input::new(p.PB0, Pull::Up));
 
