@@ -52,6 +52,7 @@ change it here and tag a new version.
 
 ## Limits to know
 
-- `charlieplex` is on/off per LED, no brightness levels.
+- `charlieplex` lights the LEDs of one group one at a time, so each gets
+  1/(LEDs in the longest group) of the time at most.
 - `soft_pwm` handles 8 LEDs, all on one port.
 - Embassy time does not advance while in Stop mode.

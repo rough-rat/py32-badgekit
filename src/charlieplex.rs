@@ -24,6 +24,11 @@
 //! time single pixels. With a handful of LEDs per slot, timing each one is
 //! cheaper and finer.)
 //!
+//! With `set_skip_dark(true)`, slots with nothing lit are left out of the
+//! refresh. The slots keep their length, so the refresh gets shorter and the
+//! lit LEDs come round more often: their brightness then also depends on how
+//! many slots are lit (12 slots, 2 lit -> 6x brighter). Off by default.
+//!
 //! Drawing goes to a canvas. `present` compiles it into the slot plans the
 //! interrupt follows and swaps them in at the end of a refresh, so a refresh
 //! never mixes two frames.
@@ -114,6 +119,9 @@ impl Led {
 /// for within the same interrupt.
 #[derive(Clone, Copy)]
 struct Slot {
+    /// LED row: index into every group. Equal to the slot's place in the
+    /// plan, unless dark slots are skipped.
+    n: u8,
     on: u8,
     actions: u8,
     extra_wakes: u8,
@@ -123,6 +131,7 @@ struct Slot {
 }
 
 const DARK: Slot = Slot {
+    n: 0,
     on: 0,
     actions: 0,
     extra_wakes: 0,
@@ -190,6 +199,10 @@ impl<const LEDS: usize, const SLOTS: usize> Default for Buffers<LEDS, SLOTS> {
 static LEVELS: AtomicPtr<AtomicU16> = AtomicPtr::new(core::ptr::null_mut());
 static LED_COUNT: AtomicUsize = AtomicUsize::new(0);
 static PLANS: [AtomicPtr<Slot>; 2] = [const { AtomicPtr::new(core::ptr::null_mut()) }; 2];
+/// Slots in each plan.
+static PLAN_SLOTS: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+/// Leave dark slots out of the plans.
+static SKIP_DARK: AtomicBool = AtomicBool::new(false);
 /// Index of the plan on show.
 static FRONT: AtomicUsize = AtomicUsize::new(0);
 /// Set by `show`, cleared by the interrupt once it has swapped.
@@ -278,6 +291,7 @@ pub fn init<const L: usize, const S: usize>(
     let plans = buffers.plans.get() as *mut [Slot; S];
     for (i, ptr) in PLANS.iter().enumerate() {
         ptr.store(unsafe { (*plans.add(i)).as_mut_ptr() }, Ordering::Relaxed);
+        PLAN_SLOTS[i].store(slots, Ordering::Relaxed);
     }
 
     // Nothing may delay the scan: everything else one priority level down.
@@ -312,7 +326,8 @@ pub struct Timing {
     pub window_cycles: u32,
     /// Longest on-time = `max_raw()`, i.e. the brightness resolution.
     pub max_on_cycles: u32,
-    /// One refresh, in core cycles.
+    /// One refresh, in core cycles. With dark slots skipped, the longest
+    /// one (everything lit).
     pub refresh_cycles: u32,
 }
 
@@ -376,6 +391,14 @@ pub fn set_level(index: usize, level: u8) {
     levels()[index].store(raw as u16, Ordering::Relaxed);
 }
 
+/// Leaves dark slots out of the refresh (from the next `prepare` on), so
+/// the lit LEDs get a bigger share of the time: their brightness then
+/// depends on the level and on how many slots are lit. Off by default,
+/// which keeps every LED's brightness independent of the others.
+pub fn set_skip_dark(on: bool) {
+    SKIP_DARK.store(on, Ordering::Relaxed);
+}
+
 /// Full brightness or off.
 pub fn set(index: usize, on: bool) {
     set_raw(index, if on { u16::MAX } else { 0 });
@@ -401,7 +424,8 @@ pub fn prepare() {
     let back = FRONT.load(Ordering::Relaxed) ^ 1;
     let slots = SLOTS.load(Ordering::Relaxed);
     // Only the interrupt reads plans, and only the front one.
-    compile(unsafe { core::slice::from_raw_parts_mut(plan(back), slots) });
+    let count = compile(unsafe { core::slice::from_raw_parts_mut(plan(back), slots) });
+    PLAN_SLOTS[back].store(count, Ordering::Relaxed);
 }
 
 /// Shows the plan from the last `prepare` from the next refresh on, and
@@ -425,12 +449,17 @@ pub async fn show() {
     }
 }
 
-/// Works out each slot's switches from LEVELS.
-fn compile(plan: &mut [Slot]) {
+/// Works out each slot's switches from LEVELS. Returns the number of slots
+/// in the plan.
+fn compile(plan: &mut [Slot]) -> usize {
     let groups = groups();
     let levels = levels();
-    for (n, slot) in plan.iter_mut().enumerate() {
+    let skip_dark = SKIP_DARK.load(Ordering::Relaxed);
+    let mut count_slots = 0;
+    for n in 0..plan.len() {
+        let slot = &mut plan[count_slots];
         *slot = DARK;
+        slot.n = n as u8;
 
         // (on-time, group bit) of the lit LEDs, sorted by on-time.
         let mut lit = [(0u16, 0u8); MAX_GROUPS];
@@ -465,7 +494,18 @@ fn compile(plan: &mut [Slot]) {
             }
             prev = time;
         }
+
+        if !(skip_dark && slot.on == 0) {
+            count_slots += 1;
+        }
     }
+
+    // A refresh needs at least one slot, even if it is dark.
+    if count_slots == 0 {
+        plan[0] = DARK;
+        count_slots = 1;
+    }
+    count_slots
 }
 
 /// Core cycles counted while scanning, wrapping. Take differences.
@@ -650,8 +690,8 @@ fn scan(s: &mut Scan) {
 
     // SAFETY: only `prepare` writes plans, and only the back one. `s.slot`
     // stays below SLOTS.
-    let n = s.slot;
-    let slot = unsafe { &*plan(FRONT.load(Ordering::Relaxed)).add(n) };
+    let slot = unsafe { &*plan(FRONT.load(Ordering::Relaxed)).add(s.slot) };
+    let n = slot.n as usize;
     let at = slot.wake_time(s.wake);
     let mut a = if s.wake == 0 { 0 } else { slot.first_action(s.wake) + 1 };
     let end = if s.wake + 1 < slot.wakes() {
@@ -681,7 +721,7 @@ fn scan(s: &mut Scan) {
     if s.wake >= slot.wakes() {
         s.wake = 0;
         s.slot += 1;
-        if s.slot >= SLOTS.load(Ordering::Relaxed) {
+        if s.slot >= PLAN_SLOTS[FRONT.load(Ordering::Relaxed)].load(Ordering::Relaxed) {
             s.slot = 0;
             // A new refresh starts with the next wake.
             if SWAP.load(Ordering::Acquire) {
@@ -707,10 +747,11 @@ fn scan(s: &mut Scan) {
     NEXT_LEN.store(len, Ordering::Relaxed);
     unsafe { syst.rvr.write(len - 1) };
 
+    let next_n = next.n as usize;
     if s.wake == 0 {
-        s.first.set_on(s.slot, next.on);
+        s.first.set_on(next_n, next.on);
     } else {
-        s.first.set_off(s.slot, next.off[next.first_action(s.wake)]);
+        s.first.set_off(next_n, next.off[next.first_action(s.wake)]);
     }
 
     let spent = (cur - 1).wrapping_sub(syst.cvr.read());
